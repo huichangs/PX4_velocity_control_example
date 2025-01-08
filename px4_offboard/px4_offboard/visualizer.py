@@ -77,17 +77,17 @@ class PX4Visualizer(Node):
 
         self.attitude_sub = self.create_subscription(
             VehicleAttitude,
-            '/fmu/out/vehicle_attitude',
+            '/px4_1/fmu/out/vehicle_attitude',
             self.vehicle_attitude_callback,
             qos_profile)
         self.local_position_sub = self.create_subscription(
             VehicleLocalPosition,
-            '/fmu/out/vehicle_local_position',
+            '/px4_1/fmu/out/vehicle_local_position',
             self.vehicle_local_position_callback,
             qos_profile)
         self.setpoint_sub = self.create_subscription(
             TrajectorySetpoint,
-            '/fmu/in/trajectory_setpoint',
+            '/px4_1/fmu/in/trajectory_setpoint',
             self.trajectory_setpoint_callback,
             qos_profile)
 

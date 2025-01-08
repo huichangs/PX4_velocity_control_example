@@ -37,8 +37,8 @@ moveBindings = {
     'd': (0, 0, 0, 1),#Yaw-
     '\x1b[A' : (0, 1, 0, 0),  #Up Arrow
     '\x1b[B' : (0, -1, 0, 0), #Down Arrow
-    '\x1b[C' : (-1, 0, 0, 0), #Right Arrow
-    '\x1b[D' : (1, 0, 0, 0),  #Left Arrow
+    '\x1b[C' : (1, 0, 0, 0), #Right Arrow
+    '\x1b[D' : (-1, 0, 0, 0),  #Left Arrow
 }
 
 
@@ -99,8 +99,8 @@ def main():
     )
 
 
-    pub = node.create_publisher(geometry_msgs.msg.Twist, '/offboard_velocity_cmd', qos_profile)
-
+    pub = node.create_publisher(geometry_msgs.msg.Point, '/offboard_position_cmd', qos_profile)
+    ang_pub = node.create_publisher(geometry_msgs.msg.Twist, '/offboard_angular_cmd', qos_profile)
     arm_toggle = False
     arm_pub = node.create_publisher(std_msgs.msg.Bool, '/arm_message', qos_profile)
 
@@ -114,8 +114,10 @@ def main():
     status = 0.0
     x_val = 0.0
     y_val = 0.0
-    z_val = 0.0
+    z_val = 5.0
     yaw_val = 0.0
+    destination = None
+
 
     try:
         print(msg)
@@ -145,9 +147,9 @@ def main():
 
             twist = geometry_msgs.msg.Twist()
             
-            x_val = (x * speed) + x_val
-            y_val = (y * speed) + y_val
-            z_val = (z * speed) + z_val
+            # x_val = (x * speed) + x_val
+            # y_val = (y * speed) + y_val
+            # z_val = (z * speed) + z_val
             yaw_val = (th * turn) + yaw_val
             twist.linear.x = x_val
             twist.linear.y = y_val
@@ -155,9 +157,19 @@ def main():
             twist.angular.x = 0.0
             twist.angular.y = 0.0
             twist.angular.z = yaw_val
-            pub.publish(twist)
-            print("X:",twist.linear.x, "   Y:",twist.linear.y, "   Z:",twist.linear.z, "   Yaw:",twist.angular.z)
-            
+            ang_pub.publish(twist)
+
+            point = geometry_msgs.msg.Point()
+            x_val = x + x_val
+            y_val = y + y_val
+            z_val = z + z_val
+            point.x = x_val
+            point.y = y_val
+            point.z = z_val
+            pub.publish(point)
+            # print("X:",twist.linear.x, "   Y:",twist.linear.y, "   Z:",twist.linear.z, "   Yaw:",twist.angular.z)
+            print(f"Position: X: {point.x}, Y: {point.y}, Z: {point.z}, Yaw: {twist.angular.z}")
+
 
     except Exception as e:
         print(e)
@@ -170,7 +182,12 @@ def main():
         twist.angular.x = 0.0
         twist.angular.y = 0.0
         twist.angular.z = 0.0
-        pub.publish(twist)
+        ang_pub.publish(twist)
+        point = geometry_msgs.msg.Point()
+        point.x = 0.0
+        point.y = 0.0
+        point.z = 0.0
+        pub.publish(point)
 
         restoreTerminalSettings(settings)
 

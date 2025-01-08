@@ -29,9 +29,11 @@ setup(
         'console_scripts': [
                 'offboard_control = px4_offboard.offboard_control:main',
                 'visualizer = px4_offboard.visualizer:main',
-                'velocity_control = px4_offboard.velocity_control:main',
+                'position_control = px4_offboard.position_control:main',
                 'control = px4_offboard.control:main',
-                'processes = px4_offboard.processes:main'
+                'processes = px4_offboard.processes:main',
+                'position_log = px4_offboard.position_log:main',
+                'slave_drone_control = px4_offboard.slave_drone_control:main',
         ],
     },
 )

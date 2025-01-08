@@ -46,13 +46,14 @@ from px4_msgs.msg import TrajectorySetpoint
 from px4_msgs.msg import VehicleStatus
 from px4_msgs.msg import VehicleAttitude
 from px4_msgs.msg import VehicleCommand
-from geometry_msgs.msg import Twist, Vector3
+from px4_msgs.msg import VehicleOdometry
+from px4_msgs.msg import VehicleGlobalPosition
+from geometry_msgs.msg import Twist, Vector3, Point
 from math import pi
 from std_msgs.msg import Bool
 
 
 class OffboardControl(Node):
-
     def __init__(self):
         super().__init__('minimal_publisher')
         qos_profile = QoSProfile(
@@ -61,61 +62,94 @@ class OffboardControl(Node):
             history=QoSHistoryPolicy.RMW_QOS_POLICY_HISTORY_KEEP_LAST,
             depth=1
         )
+        #!!!!!!!!!!!!! check and set num of drones!!!!!!!!!!!!!
+        self.num_of_drones = 3
 
         #Create subscriptions
-        self.status_sub = self.create_subscription(
+        self.master_status_sub = self.create_subscription(
             VehicleStatus,
-            '/fmu/out/vehicle_status',
-            self.vehicle_status_callback,
+            '/px4_1/fmu/out/vehicle_status',
+            self.master_vehicle_status_callback,
             qos_profile)
         
-        self.offboard_velocity_sub = self.create_subscription(
-            Twist,
-            '/offboard_velocity_cmd',
-            self.offboard_velocity_callback,
-            qos_profile)
-        
-        self.attitude_sub = self.create_subscription(
+        self.master_attitude_sub = self.create_subscription(
             VehicleAttitude,
-            '/fmu/out/vehicle_attitude',
-            self.attitude_callback,
+            '/px4_1/fmu/out/vehicle_attitude',
+            self.master_attitude_callback,
             qos_profile)
+        
+        self.odometry_sub = self.create_subscription(
+            VehicleOdometry,
+            '/px4_1/fmu/out/vehicle_odometry',
+            self.vehicle_odometry_callback,
+            qos_profile)
+        
+        #create subscriptions created by control.py
+        self.offboard_position_sub = self.create_subscription(
+            Point,
+            '/offboard_position_cmd',
+            self.offboard_position_callback,
+            qos_profile)
+        
+        self.offboard_angular_sub = self.create_subscription(
+            Twist,
+            '/offboard_angular_cmd',
+            self.offboard_angular_callback,
+            qos_profile)   
         
         self.my_bool_sub = self.create_subscription(
             Bool,
             '/arm_message',
             self.arm_message_callback,
             qos_profile)
+        
+        
 
 
-        #Create publishers
-        self.publisher_offboard_mode = self.create_publisher(OffboardControlMode, '/fmu/in/offboard_control_mode', qos_profile)
-        self.publisher_velocity = self.create_publisher(Twist, '/fmu/in/setpoint_velocity/cmd_vel_unstamped', qos_profile)
-        self.publisher_trajectory = self.create_publisher(TrajectorySetpoint, '/fmu/in/trajectory_setpoint', qos_profile)
-        self.vehicle_command_publisher_ = self.create_publisher(VehicleCommand, "/fmu/in/vehicle_command", 10)
+
+        #Create publishers(master drone)
+        self.publisher_offboard_mode = self.create_publisher(OffboardControlMode, '/px4_1/fmu/in/offboard_control_mode', qos_profile)
+        self.publisher_velocity = self.create_publisher(Twist, '/px4_1/fmu/in/setpoint_velocity/cmd_vel_unstamped', qos_profile)
+        self.publisher_trajectory = self.create_publisher(TrajectorySetpoint, '/px4_1/fmu/in/trajectory_setpoint', qos_profile)
+        self.vehicle_command_publisher_ = self.create_publisher(VehicleCommand, "/px4_1/fmu/in/vehicle_command", 10)
+
+
+        self.slave_publishers_offboard_mode = {}
+        self.slave_publishers_vehicle_command = {}
+        #create publishers(slave drones)
+        for i in range(2, self.num_of_drones + 1):
+            slave_topic_offboard_mode = f'/px4_{i}/fmu/in/offboard_control_mode'
+            slave_topic_vehicle_command = f'/px4_{i}/fmu/in/vehicle_command'
+            
+            self.slave_publishers_offboard_mode[i] = self.create_publisher(OffboardControlMode, slave_topic_offboard_mode, qos_profile)
+            self.slave_publishers_vehicle_command[i] = self.create_publisher(VehicleCommand, slave_topic_vehicle_command, qos_profile)
+
 
         
-        #creates callback function for the arm timer
+
         # period is arbitrary, just should be more than 2Hz
         arm_timer_period = .1 # seconds
         self.arm_timer_ = self.create_timer(arm_timer_period, self.arm_timer_callback)
 
-        # creates callback function for the command loop
         # period is arbitrary, just should be more than 2Hz. Because live controls rely on this, a higher frequency is recommended
         # commands in cmdloop_callback won't be executed if the vehicle is not in offboard mode
         timer_period = 0.02  # seconds
         self.timer = self.create_timer(timer_period, self.cmdloop_callback)
 
+
+
+
+
         self.nav_state = VehicleStatus.NAVIGATION_STATE_MAX
         self.arm_state = VehicleStatus.ARMING_STATE_ARMED
-        self.velocity = Vector3()
-        self.yaw = 0.0  #yaw value we send as command
-        self.trueYaw = 0.0  #current yaw value of drone
-        self.offboardMode = False
         self.flightCheck = False
-        self.myCnt = 0
         self.arm_message = False
+        self.velocity = Vector3()
+        
+        self.offboardMode = False
+        self.myCnt = 0
         self.failsafe = False
+        
 
         #states with corresponding callback functions that run once when state switches
         self.states = {
@@ -188,60 +222,58 @@ class OffboardControl(Node):
 
         self.myCnt += 1
 
+    #define state
     def state_init(self):
         self.myCnt = 0
 
     def state_arming(self):
         self.myCnt = 0
-        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0)
+        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1, 1.0)
+        for i in range(2, self.num_of_drones + 1):
+            self.publish_to_slave(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, i, 1.0)
+        
         self.get_logger().info("Arm command send")
 
     def state_takeoff(self):
         self.myCnt = 0
-        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_TAKEOFF, param1 = 1.0, param7=5.0) # param7 is altitude in meters
+        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_TAKEOFF, 1, param1 = 1.0, param7=5.0) # param7 is altitude in meters
+        for i in range(2, self.num_of_drones + 1):
+            self.publish_to_slave(VehicleCommand.VEHICLE_CMD_NAV_TAKEOFF, i, param1 = 1.0, param7=5.0)
         self.get_logger().info("Takeoff command send")
 
     def state_loiter(self):
-        self.myCnt = 0
+        self.myCnt = 0 
         self.get_logger().info("Loiter Status")
 
     def state_offboard(self):
         self.myCnt = 0
-        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, 1., 6.)
+        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, 1, 1., 6.)
+        for i in range(2, self.num_of_drones + 1):
+            self.publish_to_slave(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, i, 1., 6.)
         self.offboardMode = True
 
 
-    
 
-        
 
     # Arms the vehicle
     def arm(self):
-        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0)
+        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1, 1.0)
+        for i in range(2, self.num_of_drones + 1):
+            self.publish_to_slave(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, i, 1.0)
         self.get_logger().info("Arm command send")
 
     # Takes off the vehicle to a user specified altitude (meters)
     def take_off(self):
-        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_TAKEOFF, param1 = 1.0, param7=5.0) # param7 is altitude in meters
+        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_TAKEOFF, 1, param1 = 1.0, param7=5.0) # param7 is altitude in meters
+        for i in range(2, self.num_of_drones + 1):
+            self.publish_to_slave(VehicleCommand.VEHICLE_CMD_NAV_TAKEOFF, i, param1 = 1.0, param7=5.0)
         self.get_logger().info("Takeoff command send")
 
-    #publishes command to /fmu/in/vehicle_command
-    def publish_vehicle_command(self, command, param1=0.0, param2=0.0, param7=0.0):
-        msg = VehicleCommand()
-        msg.param1 = param1
-        msg.param2 = param2
-        msg.param7 = param7    # altitude value in takeoff command
-        msg.command = command  # command ID
-        msg.target_system = 1  # system which should execute the command
-        msg.target_component = 1  # component which should execute the command, 0 for all components
-        msg.source_system = 1  # system sending the command
-        msg.source_component = 1  # component sending the command
-        msg.from_external = True
-        msg.timestamp = int(Clock().now().nanoseconds / 1000) # time in microseconds
-        self.vehicle_command_publisher_.publish(msg)
+
+
 
     #receives and sets vehicle status values 
-    def vehicle_status_callback(self, msg):
+    def master_vehicle_status_callback(self, msg):
 
         if (msg.nav_state != self.nav_state):
             self.get_logger().info(f"NAV_STATUS: {msg.nav_state}")
@@ -259,35 +291,68 @@ class OffboardControl(Node):
         self.arm_state = msg.arming_state
         self.failsafe = msg.failsafe
         self.flightCheck = msg.pre_flight_checks_pass
-
-
-    #receives Twist commands from Teleop and converts NED -> FLU
-    def offboard_velocity_callback(self, msg):
-        #implements NED -> FLU Transformation
-        self.velocity.x = -msg.linear.y
-        self.velocity.y = msg.linear.x
-        self.velocity.z = -msg.linear.z
-        self.yaw = msg.angular.z
-
-        # X (FLU) is -Y (NED)
-        self.velocity.x = -msg.linear.y
-
-        # Y (FLU) is X (NED)
-        self.velocity.y = msg.linear.x
-
-        # Z (FLU) is -Z (NED)
-        self.velocity.z = -msg.linear.z
-
-        # A conversion for angular z is done in the attitude_callback function(it's the '-' in front of self.trueYaw)
-        self.yaw = msg.angular.z
-
+    
     #receives current trajectory values from drone and grabs the yaw value of the orientation
-    def attitude_callback(self, msg):
+    def master_attitude_callback(self, msg):
         orientation_q = msg.q
 
         #trueYaw is the drones current yaw value
         self.trueYaw = -(np.arctan2(2.0*(orientation_q[3]*orientation_q[0] + orientation_q[1]*orientation_q[2]), 
-                                  1.0 - 2.0*(orientation_q[0]*orientation_q[0] + orientation_q[1]*orientation_q[1])))
+                              1.0 - 2.0*(orientation_q[0]*orientation_q[0] + orientation_q[1]*orientation_q[1])))
+    
+
+    
+    #get from control.py
+    def offboard_position_callback(self, msg):
+        self.target_position_x = msg.x
+        self.target_position_y = msg.y
+        self.target_position_z = msg.z
+        
+    def offboard_angular_callback(self, msg):
+        self.yaw = msg.angular.z
+    
+    def vehicle_odometry_callback(self, msg):
+        self.current_x = msg.position[0]
+        self.current_y = msg.position[1]
+        self.current_z = msg.position[2]
+
+
+
+
+    #publishes command to /fmu/in/vehicle_command
+    def publish_vehicle_command(self, command, target_system, param1=0.0, param2=0.0, param7=0.0):
+        msg = VehicleCommand()
+        msg.param1 = param1
+        msg.param2 = param2
+        msg.param7 = param7    # altitude value in takeoff command
+        msg.command = command  # command ID
+        msg.target_system = target_system + 1  # system which should execute the command
+        msg.target_component = 1  # component which should execute the command, 0 for all components
+        msg.source_system = 1  # system sending the command
+        msg.source_component = 1  # component sending the command
+        msg.from_external = True
+        msg.timestamp = int(Clock().now().nanoseconds / 1000) # time in microseconds
+        self.vehicle_command_publisher_.publish(msg)
+
+    #publishes command to slave drones
+    def publish_to_slave(self, command, slave_id, param1=0.0, param2=0.0, param7=0.0):
+        if slave_id in self.slave_publishers_vehicle_command:
+            msg = VehicleCommand()
+            msg.param1 = param1
+            msg.param2 = param2
+            msg.param7 = param7
+            msg.command = command
+            msg.target_system = slave_id + 1  # Adjust as needed
+            msg.target_component = 1
+            msg.source_system = 1
+            msg.source_component = 1
+            msg.from_external = True
+            msg.timestamp = int(Clock().now().nanoseconds / 1000)
+            self.slave_publishers_vehicle_command[slave_id].publish(msg)
+
+
+
+
         
     #publishes offboard control modes and velocity as trajectory setpoints
     def cmdloop_callback(self):
@@ -298,20 +363,46 @@ class OffboardControl(Node):
             offboard_msg.position = False
             offboard_msg.velocity = True
             offboard_msg.acceleration = False
-            self.publisher_offboard_mode.publish(offboard_msg)            
+            #publish offboard mode master and slaves
+            self.publisher_offboard_mode.publish(offboard_msg)
+            for i in range(2, self.num_of_drones + 1):
+                self.slave_publishers_offboard_mode[i].publish(offboard_msg)
 
-            # Compute velocity in the world frame
-            cos_yaw = np.cos(self.trueYaw)
-            sin_yaw = np.sin(self.trueYaw)
-            velocity_world_x = (self.velocity.x * cos_yaw - self.velocity.y * sin_yaw)
-            velocity_world_y = (self.velocity.x * sin_yaw + self.velocity.y * cos_yaw)
+
+            # Calculate the position error
+            position_error_x = self.target_position_x + self.current_x
+            position_error_y = self.target_position_y - self.current_y
+            position_error_z = self.target_position_z + self.current_z
+
+            # Determine the velocity based on the position error
+            if abs(position_error_x) <= 0.1:
+                velocity_world_x = 0
+            elif position_error_x > 0.1:
+                velocity_world_x = -0.5
+            else:  
+                velocity_world_x = 0.5
+            
+            if abs(position_error_y) <= 0.1:
+                velocity_world_y = 0
+            elif position_error_y > 0.1:
+                velocity_world_y = 0.5
+            else:  
+                velocity_world_y = -0.5
+            
+            if abs(position_error_z) <= 0.1:
+                velocity_world_z = 0
+            elif position_error_z > 0.1:
+                velocity_world_z = -0.5
+            else:  
+                velocity_world_z = 0.5
+
 
             # Create and publish TrajectorySetpoint message with NaN values for position and acceleration
             trajectory_msg = TrajectorySetpoint()
             trajectory_msg.timestamp = int(Clock().now().nanoseconds / 1000)
             trajectory_msg.velocity[0] = velocity_world_x
             trajectory_msg.velocity[1] = velocity_world_y
-            trajectory_msg.velocity[2] = self.velocity.z
+            trajectory_msg.velocity[2] = velocity_world_z
             trajectory_msg.position[0] = float('nan')
             trajectory_msg.position[1] = float('nan')
             trajectory_msg.position[2] = float('nan')
@@ -320,6 +411,7 @@ class OffboardControl(Node):
             trajectory_msg.acceleration[2] = float('nan')
             trajectory_msg.yaw = float('nan')
             trajectory_msg.yawspeed = self.yaw
+            
 
             self.publisher_trajectory.publish(trajectory_msg)
 
